@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tetris – Light Blue</title>
+  <style>
+    :root{ --bg:#eaf6ff; --panel:#d6ecff; --accent:#4f8dff; --text:#073763; --muted:#5a7ca5; }
+    *{box-sizing:border-box} html,body{height:100%}
+    body{ margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Inter,Arial; background:var(--bg); color:var(--text); display:grid; place-items:center; padding:16px; }
+    .app{ width: min(1100px, 96vw); display:grid; gap:16px; grid-template-columns: 1fr 260px; }
+    @media (max-width:900px){ .app{grid-template-columns:1fr} }
+    .board-wrap{ background:var(--panel); padding:16px; border-radius:20px; box-shadow:0 20px 40px rgba(0,0,0,.1); display:grid; grid-template-rows:auto 1fr auto; gap:12px; }
+    .topbar{display:flex; justify-content:space-between; align-items:center; gap:10px}
+    .title{font-size:clamp(18px, 2.4vw, 24px); letter-spacing:.08em; text-transform:uppercase; color:var(--muted)}
+    canvas{ display:block; image-rendering: pixelated; border-radius:12px; box-shadow:0 10px 20px rgba(0,0,0,.15), inset 0 0 0 1px #a8ccff }
+    #board{ background: linear-gradient(180deg,#d6ecff,#b5d8ff); width:min(70vw,520px); aspect-ratio:10/20; }
+    .side{ display:grid; gap:12px }
+    .panel{ background:var(--panel); border-radius:20px; padding:14px; box-shadow:0 10px 30px rgba(0,0,0,.15), inset 0 0 0 1px #a8ccff }
+    .panel h3{margin:0 0 8px; font-size:14px; color:var(--muted)}
+    #next,#hold{ width:100%; aspect-ratio:1/1; background:var(--bg); border-radius:14px }
+    .icon-btn{background:linear-gradient(180deg,#a8d1ff,#8cbcff); border:none; border-radius:12px; padding:6px 10px; font-size:16px; cursor:pointer; box-shadow:0 4px 12px rgba(0,0,0,.15); color:var(--text)}
+    .modal{ position:absolute; inset:0; display:grid; place-items:center; }
+    .modal .card{ background:rgba(255,255,255,.95); border:1px solid #aacdff; padding:20px; border-radius:16px; text-align:center; max-width:420px; box-shadow:0 8px 28px rgba(0,0,0,.15) }
+    .hidden{ display:none }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="board-wrap">
+      <div class="topbar">
+        <div class="title">Tetris</div>
+        <div style="display:flex; gap:8px; align-items:center">
+          <button id="sound" class="icon-btn">🔊</button>
+          <button id="guide" class="icon-btn">ℹ️</button>
+        </div>
+      </div>
+
+      <div class="grid">
+        <canvas id="board" width="300" height="600"></canvas>
+        <div id="modal" class="modal hidden">
+          <div class="card">
+            <h2>How to Play</h2>
+            <p><b>Arrows</b>: Move/Rotate<br>
+               <b>Space</b>: Hard Drop<br>
+               <b>C</b>: Hold<br>
+               <b>P</b>: Pause</p>
+            <p>Clear lines and don't let the blocks stack too high!</p>
+            <button id="closeGuide" class="icon-btn">OK</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="footer"><span style="color:var(--muted)">Press P to pause</span></div>
+    </div>
+
+    <div class="side">
+      <div class="panel"><h3>Next</h3><canvas id="next" width="200" height="200"></canvas></div>
+      <div class="panel"><h3>Hold</h3><canvas id="hold" width="200" height="200"></canvas></div>
+    </div>
+  </div>
+
+  <script>
+    // Grid
+    const COLS = 10, ROWS = 20, CELL = 30;
+    const board = document.getElementById('board');
+    board.width = COLS*CELL; board.height = ROWS*CELL;
+    const ctx = board.getContext('2d');
+
+    // Next/Hold canvases
+    const nextC = document.getElementById('next'); const nextCtx = nextC.getContext('2d');
+    const holdC = document.getElementById('hold'); const holdCtx = holdC.getContext('2d');
+    nextC.width = nextC.height = 4*CELL; holdC.width = holdC.height = 4*CELL;
+
+    // Pieces (matrix form)
+    const SHAPES = {
+      I:[[0,0,0,0],[1,1,1,1],[0,0,0,0],[0,0,0,0]],
+      J:[[1,0,0],[1,1,1],[0,0,0]],
+      L:[[0,0,1],[1,1,1],[0,0,0]],
+      O:[[1,1],[1,1]],
+      S:[[0,1,1],[1,1,0],[0,0,0]],
+      T:[[0,1,0],[1,1,1],[0,0,0]],
+      Z:[[1,1,0],[0,1,1],[0,0,0]]
+    };
+
+    // Blue-themed colors (light gradients will be applied when drawing)
+    const COLORS = { I:'#9fd4ff', J:'#a8dbff', L:'#b8e2ff', O:'#cdecff', S:'#a2d8ff', T:'#b2e0ff', Z:'#c1e7ff', ghost:'#dcefff' };
+
+    // Utilities
+    function makeMatrix(w,h,fill=0){ return Array.from({length:h},()=>Array(w).fill(fill)); }
+    function clone(obj){ return JSON.parse(JSON.stringify(obj)); }
+    function rotateMatrix(m, dir){
+      const N=m.length; const res=makeMatrix(N,N,0);
+      for(let y=0;y<N;y++) for(let x=0;x<N;x++) res[x][N-1-y]=m[y][x];
+      return dir>0?res:rotateMatrix(res,1);
+    }
+
+    // Draw a single cell with subtle gradient
+    function drawCell(ctx,x,y,color,alpha=1,size=CELL){
+      const gx = x*CELL, gy = y*CELL;
+      const grad = ctx.createLinearGradient(gx,gy,gx+size,gy+size);
+      grad.addColorStop(0, shade(color, 30));
+      grad.addColorStop(0.6, color);
+      grad.addColorStop(1, shade(color, -25));
+      ctx.globalAlpha = alpha; ctx.fillStyle = grad; ctx.fillRect(gx,gy,size,size);
+      ctx.globalAlpha = 1; ctx.strokeStyle='rgba(255,255,255,0.08)'; ctx.strokeRect(gx+0.5,gy+0.5,size-1,size-1);
+    }
+
+    // Shade helper (lighten/darken hex)
+    function shade(hex, amt){
+      const m = hex.replace('#',''); const r=parseInt(m.substring(0,2),16); const g=parseInt(m.substring(2,4),16); const b=parseInt(m.substring(4,6),16);
+      const nr = Math.max(0,Math.min(255,r+amt)); const ng=Math.max(0,Math.min(255,g+amt)); const nb=Math.max(0,Math.min(255,b+amt));
+      return '#'+nr.toString(16).padStart(2,'0')+ng.toString(16).padStart(2,'0')+nb.toString(16).padStart(2,'0');
+    }
+
+    // Draw matrix into any ctx at pixel offsets (in cells)
+    function drawMatrixToCtx(ctx, matrix, color, offX=0, offY=0, cellSize=CELL){
+      // don't clear the ctx here; caller decides
+      for(let y=0;y<matrix.length;y++) for(let x=0;x<matrix[y].length;x++) if(matrix[y][x]){
+        if(ctx === nextCtx || ctx === holdCtx){ // smaller canvases: draw scaled
+          const sx = offX + x*cellSize; const sy = offY + y*cellSize; // offX/offY in pixels
+          const grad = ctx.createLinearGradient(sx,sy,sx+cellSize,sy+cellSize);
+          grad.addColorStop(0, shade(color, 30)); grad.addColorStop(0.6, color); grad.addColorStop(1, shade(color, -20));
+          ctx.fillStyle = grad; ctx.fillRect(sx,sy,cellSize,cellSize); ctx.strokeStyle='rgba(255,255,255,0.08)'; ctx.strokeRect(sx+0.5,sy+0.5,cellSize-1,cellSize-1);
+        } else {
+          drawCell(ctx, offX + x, offY + y, color, 1, cellSize);
+        }
+      }
+    }
+
+    // Game state
+    const arena = makeMatrix(COLS, ROWS, 0);
+    let queue = [];
+    function bag(){ const types=Object.keys(SHAPES); for(let i=types.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [types[i],types[j]]=[types[j],types[i]];} return types; }
+
+    let player = { pos:{x:3,y:-2}, matrix:null, type:null };
+    let hold = null; let canHold=true;
+
+    function newPiece(type){
+      const base = SHAPES[type]; const N=base.length; const M=base[0].length; const S=Math.max(N,M);
+      const mat=makeMatrix(S,S,0);
+      for(let y=0;y<N;y++) for(let x=0;x<M;x++) mat[y][x]=base[y][x];
+      return {matrix:mat, type};
+    }
+
+    function refillQueue(){ if(queue.length<=7) queue.push(...bag()); }
+
+    function spawn(){ refillQueue(); const type = queue.shift(); player = { pos:{x:Math.floor((COLS - (newPiece(type).matrix.length))/2), y:-2}, matrix: newPiece(type).matrix, type }; canHold=true; if(collide(arena,player)) { // game over - clear arena
+        for(let y=0;y<ROWS;y++) for(let x=0;x<COLS;x++) arena[y][x]=0; }
+      drawNext(); drawHold(); }
+
+    function holdPiece(){ if(!canHold) return; if(!hold){ hold = {matrix:player.matrix, type:player.type}; spawn(); } else { const tmp = hold; hold = {matrix:player.matrix, type:player.type}; player.matrix = tmp.matrix; player.type = tmp.type; player.pos = {x:Math.floor((COLS - player.matrix.length)/2), y:-2}; } canHold=false; drawHold(); }
+
+    function collide(arenaObj, piece){
+      const m = piece.matrix; for(let y=0;y<m.length;y++) for(let x=0;x<m[y].length;x++) if(m[y][x]){
+        const ax = pieceOffsetX(piece) + x; const ay = pieceOffsetY(piece) + y; if(ay>=ROWS || ax<0 || ax>=COLS || (ay>=0 && arenaObj[ay][ax])) return true; }
+      return false;
+    }
+    // helper to get current piece offsets
+    function pieceOffsetX(piece){ if(piece === player) return player.pos.x; return piece.x || 0; }
+    function pieceOffsetY(piece){ if(piece === player) return player.pos.y; return piece.y || 0; }
+
+    function merge(){ const m = player.matrix; for(let y=0;y<m.length;y++) for(let x=0;x<m[y].length;x++) if(m[y][x]){
+        const ax = player.pos.x + x; const ay = player.pos.y + y; if(ay>=0) arena[ay][ax] = player.type; }
+    }
+
+    function clearLines(){ let cleared=0; outer: for(let y=ROWS-1;y>=0;y--){ for(let x=0;x<COLS;x++){ if(!arena[y][x]) continue outer;} arena.splice(y,1); arena.unshift(Array(COLS).fill(0)); cleared++; y++; } if(cleared>0){} }
+
+    // draw functions
+    function draw(){
+      ctx.fillStyle = '#eaf6ff'; ctx.fillRect(0,0,board.width,board.height);
+      // arena
+      for(let y=0;y<ROWS;y++) for(let x=0;x<COLS;x++) if(arena[y][x]) drawCell(ctx,x,y,COLORS[arena[y][x]]);
+      // ghost piece (simple translucent)
+      const gy = calcGhostY(); if(player.matrix) for(let y=0;y<player.matrix.length;y++) for(let x=0;x<player.matrix[y].length;x++) if(player.matrix[y][x]) drawCell(ctx, player.pos.x+x, gy+y, COLORS.ghost, .35);
+      // current piece
+      if(player.matrix) for(let y=0;y<player.matrix.length;y++) for(let x=0;x<player.matrix[y].length;x++) if(player.matrix[y][x]) drawCell(ctx, player.pos.x+x, player.pos.y+y, COLORS[player.type]);
+    }
+
+    function drawNext(){ nextCtx.clearRect(0,0,nextC.width,nextC.height); if(queue.length>0){ const m = newPiece(queue[0]).matrix; const w = m[0].length, h=m.length; const xOff = Math.floor((4 - w)/2)*CELL; const yOff = Math.floor((4 - h)/2)*CELL; drawMatrixToCtx(nextCtx,m,COLORS[queue[0]], xOff, yOff, CELL); } }
+    function drawHold(){ holdCtx.clearRect(0,0,holdC.width,holdC.height); if(hold){ const m = hold.matrix; const w=m[0].length,h=m.length; const xOff=Math.floor((4-w)/2)*CELL; const yOff=Math.floor((4-h)/2)*CELL; drawMatrixToCtx(holdCtx,m,COLORS[hold.type], xOff, yOff, CELL); } }
+
+    function calcGhostY(){ if(!player.matrix) return player.pos.y; let gy = player.pos.y; while(true){ gy++; if(collide(arena, {matrix:player.matrix, x:player.pos.x, y:gy})) { return gy-1;} } }
+
+    // movement & rotation
+    function playerDrop(){ player.pos.y++; if(collide(arena, player)){ player.pos.y--; merge(); clearLines(); spawn(); } }
+    function playerMove(dir){ player.pos.x += dir; if(collide(arena, player)) player.pos.x -= dir; }
+    function playerRotate(dir){ const old = clone(player.matrix); const m = rotateMatrix(player.matrix, dir); const test = {matrix: m, x: player.pos.x, y: player.pos.y}; // try wall kicks
+      const kicks = [0,-1,1,-2,2]; for(const dx of kicks){ test.x = player.pos.x + dx; if(!collide(arena, test)){ player.matrix = m; player.pos.x = test.x; return; } } player.matrix = old; }
+    function hardDrop(){ while(!collide(arena, {...player, pos:{x:player.pos.x, y:player.pos.y+1}})) player.pos.y++; // this construct won't match collide signature so simpler:
+      while(true){ player.pos.y++; if(collide(arena, player)){ player.pos.y--; break; } } merge(); clearLines(); spawn(); }
+
+    // simplified collide signature: adapt collide to accept object with matrix,x,y
+    function collide(arenaObj, piece){
+      const mat = piece.matrix; const px = (piece.pos && piece.pos.x)!=null ? piece.pos.x : piece.x || 0; const py = (piece.pos && piece.pos.y)!=null ? piece.pos.y : piece.y || 0;
+      for(let y=0;y<mat.length;y++) for(let x=0;x<mat[y].length;x++) if(mat[y][x]){
+        const ax = px + x; const ay = py + y; if(ay>=ROWS || ax<0 || ax>=COLS || (ay>=0 && arenaObj[ay][ax])) return true; }
+      return false;
+    }
+
+    // queue & spawn boot
+    function refillQueue(){ if(queue.length<=7) queue.push(...bag()); }
+    refillQueue(); spawn();
+
+    // Game loop
+    let last = 0, acc = 0, dropInterval = 1000, paused=false;
+    function loop(t){ const dt = t - last; last = t; if(!paused){ acc += dt; if(acc > dropInterval){ playerDrop(); acc = 0; } } draw(); requestAnimationFrame(loop); }
+    requestAnimationFrame(loop);
+
+    // Robust key handling
+    function handleKey(e){ const code = e.code || ''; const key = e.key || ''; // prevent arrow/space default
+      if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Space'].includes(code)) e.preventDefault();
+      if(code === 'ArrowLeft' || key === 'ArrowLeft'){ playerMove(-1); }
+      else if(code === 'ArrowRight' || key === 'ArrowRight'){ playerMove(1); }
+      else if(code === 'ArrowDown' || key === 'ArrowDown'){ playerDrop(); }
+      else if(code === 'ArrowUp' || key === 'ArrowUp'){ playerRotate(1); }
+      else if(code === 'KeyZ' || key === 'z' || key === 'Z'){ playerRotate(-1); }
+      else if(code === 'Space' || key === ' '){ // hard drop
+        while(true){ player.pos.y++; if(collide(arena, player)){ player.pos.y--; break; } }
+        merge(); clearLines(); spawn();
+      }
+      else if(code === 'KeyC' || key === 'c' || key === 'C'){ holdPiece(); }
+      else if(code === 'KeyP' || key === 'p' || key === 'P'){ paused = !paused; document.getElementById('modal').classList.toggle('hidden', !paused); }
+    }
+    window.addEventListener('keydown', handleKey, false);
+
+    // Next/Hold & Guide UI
+    document.getElementById('guide').onclick = ()=>{ paused = true; document.getElementById('modal').classList.remove('hidden'); };
+    document.getElementById('closeGuide').onclick = ()=>{ document.getElementById('modal').classList.add('hidden'); paused = false; };
+
+    // Sound toggle (simple click sound using WebAudio)
+    const AudioCtx = window.AudioContext || window.webkitAudioContext; const audio = AudioCtx ? new AudioCtx() : null; let soundOn=true;
+    document.getElementById('sound').onclick = ()=>{ soundOn = !soundOn; document.getElementById('sound').textContent = soundOn ? '🔊' : '🔇'; };
+    function beep(freq,dur=0.06){ if(!audio || !soundOn) return; const o = audio.createOscillator(); const g = audio.createGain(); o.connect(g); g.connect(audio.destination); o.type='sine'; o.frequency.value=freq; g.gain.setValueAtTime(0.08,audio.currentTime); o.start(); o.stop(audio.currentTime+dur); }
+
+    // ensure next/hold draw on start
+    drawNext(); drawHold();
+  </script>
+</body>
+</html>
